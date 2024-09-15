@@ -1,6 +1,7 @@
 // Arduino code for ESP32 WROOM 32
-// Emulating an Altinak flat panel device
+// Emulating an Altinak flat panel device with optional Bluetooth support
 
+#include "BluetoothSerial.h" // Include BluetoothSerial library
 #include <Arduino.h>
 
 #define PWM_PIN 12
@@ -8,8 +9,8 @@
 #define PWM_RESOLUTION 16  // bits
 #define PWM_CHANNEL 0
 
-const uint16_t MIN_PWM_VALUE = 0;     // minimum PWM value for min brightness
-const uint16_t MAX_PWM_VALUE = 65535; // maximum PWM value for max brightness
+const uint16_t MIN_PWM_VALUE = 50;   // minimum PWM value for min brightness
+const uint16_t MAX_PWM_VALUE = 5000; // maximum PWM value for max brightness
 
 #define SERIAL_BAUD_RATE 9600
 
@@ -18,32 +19,69 @@ const uint16_t MAX_PWM_VALUE = 65535; // maximum PWM value for max brightness
 #define FIRMWARE_VERSION 1 // 001
 
 // Variables to store device state
-uint8_t brightness = 0; // brightness level (0-255)
-bool lightOn = false;   // light on/off status
+uint8_t brightness = 128; // brightness level (0-255)
+bool lightOn = true;      // light on/off status
+
+// Bluetooth Serial object
+BluetoothSerial BTSerial;
+
+// Pointer to the active serial stream (either Serial or BTSerial)
+Stream *activeSerial = &Serial;
+
+void updatePWM();
+void sendResponse(String resp);
+String buildResponse(char cmdChar, const char *data);
+void processCommand(String cmd);
 
 void setup() {
   // Initialize Serial
   Serial.begin(SERIAL_BAUD_RATE);
+
+  // Initialize Bluetooth Serial
+  if (!BTSerial.begin("ESP32_FlatPanel")) {
+    // If Bluetooth initialization fails, continue without it
+    Serial.println("An error occurred initializing Bluetooth");
+  } else {
+    Serial.println("Bluetooth initialized");
+  }
 
   // Initialize PWM using ledc
   ledcSetup(PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcAttachPin(PWM_PIN, PWM_CHANNEL);
 
   // Initially set PWM value to zero
-  ledcWrite(PWM_CHANNEL, 0);
+  updatePWM();
 }
 
-// Function to build responses
-String buildResponse(char cmdChar, const char *data) {
-  char buffer[16];
-  sprintf(buffer, "*%c%02d%s", cmdChar, PRODUCT_ID, data);
-  return String(buffer);
-}
+void loop() {
+  // Check if Bluetooth is connected
+  if (BTSerial.hasClient()) {
+    activeSerial = &BTSerial;
+  } else {
+    activeSerial = &Serial;
+  }
 
-// Function to send response over Serial
-void sendResponse(String resp) {
-  Serial.print(resp);
-  Serial.print('\n'); // send LF as per instructions
+  // Read and process commands from the active serial interface
+  static String inputString = "";
+  while (activeSerial->available()) {
+    char inChar = (char)activeSerial->read();
+    if (inChar == '\r') {
+      // Process the command
+      processCommand(inputString);
+      // Clear the input string
+      inputString = "";
+    } else {
+      inputString += inChar;
+    }
+  }
+
+  // Handle potential Bluetooth dropouts
+  // If Bluetooth client disconnects, reset the input string
+  if (activeSerial == &BTSerial && !BTSerial.hasClient()) {
+    inputString = "";
+  }
+
+  yield();
 }
 
 // Function to update PWM output
@@ -58,6 +96,20 @@ void updatePWM() {
   }
 }
 
+// Function to send response over the active serial interface
+void sendResponse(String resp) {
+  activeSerial->print(resp);
+  activeSerial->print('\n'); // send LF as per instructions
+}
+
+// Function to build responses
+String buildResponse(char cmdChar, const char *data) {
+  char buffer[16];
+  sprintf(buffer, "*%c%02d%s", cmdChar, PRODUCT_ID, data);
+  return String(buffer);
+}
+
+// Function to process commands
 void processCommand(String cmd) {
   // Commands start with '>'
   if (cmd.length() == 0 || cmd.charAt(0) != '>') {
@@ -71,25 +123,24 @@ void processCommand(String cmd) {
   switch (cmdCode) {
   case 'P': // Ping
     // Command: >POOO
-    // Response: >PiiOOO
+    // Response: *PiiOOO
     response = buildResponse('P', "OOO");
     sendResponse(response);
     break;
   case 'O': // Open (dummy out)
     // Command: >OOOO
-    // Response: >OiiOOO
+    // Response: *OiiOOO
     response = buildResponse('O', "OOO");
     sendResponse(response);
     break;
   case 'C': // Close (dummy out)
     // Command: >COOO
-    // Response: >CiiOOO
-    response = buildResponse('C', "OOO");
-    sendResponse(response);
+    // Response: *CiiOOO
+    sendResponse(buildResponse('C', "OOO"));
     break;
   case 'L': // Light on
     // Command: >LOOO
-    // Response: >LiiOOO
+    // Response: *LiiOOO
     lightOn = true;
     updatePWM(); // update PWM output
     response = buildResponse('L', "OOO");
@@ -97,7 +148,7 @@ void processCommand(String cmd) {
     break;
   case 'D': // Light off
     // Command: >DOOO
-    // Response: >DiiOOO
+    // Response: *DiiOOO
     lightOn = false;
     // Turn off PWM
     ledcWrite(PWM_CHANNEL, 0);
@@ -106,7 +157,7 @@ void processCommand(String cmd) {
     break;
   case 'B': // Set Brightness
     // Command: >Bxxx
-    // Response: >Biixxx
+    // Response: *Biixxx
     if (cmd.length() >= 5) {
       String brightnessStr = cmd.substring(2, 5);
       int b = brightnessStr.toInt();
@@ -122,7 +173,7 @@ void processCommand(String cmd) {
     break;
   case 'J': // Get Brightness
     // Command: >JOOO
-    // Response: >Jiixxx
+    // Response: *Jiixxx
     {
       char buffer[4];
       sprintf(buffer, "%03d", brightness);
@@ -132,11 +183,11 @@ void processCommand(String cmd) {
     break;
   case 'S': // Get State
     // Command: >SOOO
-    // Response: >Siiqrs
+    // Response: *Siiqrs
     {
       char s, r, q;
-      // s: cover status, set to '2' (cover open)
-      s = '2';
+      // s: cover status, set to '1' (cover closed)
+      s = '1';
       // r: light status, '0' off, '1' on
       r = lightOn ? '1' : '0';
       // q: motor status, set to '0' (motor stopped)
@@ -152,7 +203,7 @@ void processCommand(String cmd) {
     break;
   case 'V': // Get Version
     // Command: >VOOO
-    // Response: >Vii001
+    // Response: *Viivvv
     response = buildResponse('V', "001");
     sendResponse(response);
     break;
@@ -161,24 +212,3 @@ void processCommand(String cmd) {
     break;
   }
 }
-
-void loop() {
-  // Read and process commands from Serial
-  static String inputString = "";
-  while (Serial.available()) {
-    char inChar = (char)Serial.read();
-    if (inChar == '\r') {
-      // Process the command
-      processCommand(inputString);
-      // Clear the input string
-      inputString = "";
-    } else {
-      inputString += inChar;
-    }
-  }
-
-  // Other code can go here
-}
-
-// Function to process commands
-
