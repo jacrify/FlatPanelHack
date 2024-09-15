@@ -1,275 +1,184 @@
+// Arduino code for ESP32 WROOM 32
+// Emulating an Altinak flat panel device
+
 #include <Arduino.h>
 
-const int ledPin = 12; // GPIO12 connected to MOSFET gate
-const int bits=8;
-const int freq=1000;
-const long maxBrightness=(1 << bits) - 1;
+#define PWM_PIN 12
+#define PWM_FREQUENCY 1000 // in Hz
+#define PWM_RESOLUTION 16  // bits
+#define PWM_CHANNEL 0
 
-// void setup() {
-//   // Setup PWM on GPIO12
-//   ledcSetup(0, freq, bits); // Channel 0, 5kHz frequency, 16-bit resolution
-//   ledcAttachPin(ledPin, 0);
-// }
+const uint16_t MIN_PWM_VALUE = 0;     // minimum PWM value for min brightness
+const uint16_t MAX_PWM_VALUE = 65535; // maximum PWM value for max brightness
 
-// void loop() {
-  
-//   // Increase brightness from 0 to 65535
-//   for (int brightness = 0; brightness <= maxBrightness; brightness++) {
-//     ledcWrite(0, brightness);
-//     delay(1000 / maxBrightness); // Shorter delay for smoother transition
-//   }
+#define SERIAL_BAUD_RATE 9600
 
-//   // Decrease brightness from 65535 to 0
-//   for (int brightness = maxBrightness; brightness >= 0; brightness--) {
-//     ledcWrite(0, brightness);
-//     delay(1000 / maxBrightness); // Shorter delay for smoother transition
-//   }
-// }
+// Device constants
+#define PRODUCT_ID 99
+#define FIRMWARE_VERSION 1 // 001
 
-/*
-What: LEDLightBoxAlnitak - PC controlled lightbox implmented using the
-        Alnitak (Flip-Flat/Flat-Man) command set found here:
-        http://www.optecinc.com/astronomy/pdf/Alnitak%20Astrosystems%20GenericCommandsR3.pdf
-
-Who:
-        Created By: Jared Wellman - jared@mainsequencesoftware.com
-
-When:
-        Last modified:  2013/May/05
-
-
-Typical usage on the command prompt:
-Send     : >S000\n      //request state
-Recieve  : *S19000\n    //returned state
-
-Send     : >B128\n      //set brightness 128
-Recieve  : *B19128\n    //confirming brightness set to 128
-
-Send     : >J000\n      //get brightness
-Recieve  : *B19128\n    //brightness value of 128 (assuming as set from above)
-
-Send     : >L000\n      //turn light on (uses set brightness value)
-Recieve  : *L19000\n    //confirms light turned on
-
-Send     : >D000\n      //turn light off (brightness value should not be
-changed) Recieve  : *D19000\n    //confirms light turned off.
-*/
-
-
-long brightness = 0;
-
-enum devices {
-  FLAT_MAN_L = 10,
-  FLAT_MAN_XL = 15,
-  FLAT_MAN = 19,
-  FLIP_FLAT = 99
-};
-
-enum motorStatuses { STOPPED = 0, RUNNING };
-
-enum lightStatuses { OFF = 0, ON };
-
-enum shutterStatuses {
-  UNKNOWN = 0, // ie not open or closed...could be moving
-  CLOSED,
-  OPEN
-};
-
-int deviceId = FLIP_FLAT;
-int motorStatus = STOPPED;
-int lightStatus = OFF;
-int coverStatus = UNKNOWN;
+// Variables to store device state
+uint8_t brightness = 0; // brightness level (0-255)
+bool lightOn = false;   // light on/off status
 
 void setup() {
-  // initialize the serial communication:
-  Serial.begin(9600);
-  // initialize the ledPin as an output:
-  ledcSetup(0, freq, bits); // Channel 0, 5kHz frequency, 16-bit resolution
-  ledcAttachPin(ledPin, 0);
-  ledcWrite(0, 255);
+  // Initialize Serial
+  Serial.begin(SERIAL_BAUD_RATE);
+
+  // Initialize PWM using ledc
+  ledcSetup(PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
+  ledcAttachPin(PWM_PIN, PWM_CHANNEL);
+
+  // Initially set PWM value to zero
+  ledcWrite(PWM_CHANNEL, 0);
 }
 
+// Function to build responses
+String buildResponse(char cmdChar, const char *data) {
+  char buffer[16];
+  sprintf(buffer, "*%c%02d%s", cmdChar, PRODUCT_ID, data);
+  return String(buffer);
+}
 
-void SetShutter(int val) {
-  if (val == OPEN && coverStatus != OPEN) {
-    coverStatus = OPEN;
-    // TODO: Implement code to OPEN the shutter.
-  } else if (val == CLOSED && coverStatus != CLOSED) {
-    coverStatus = CLOSED;
-    // TODO: Implement code to CLOSE the shutter
+// Function to send response over Serial
+void sendResponse(String resp) {
+  Serial.print(resp);
+  Serial.print('\n'); // send LF as per instructions
+}
+
+// Function to update PWM output
+void updatePWM() {
+  if (lightOn) {
+    // Map brightness (0-255) to PWM value (MIN_PWM_VALUE to MAX_PWM_VALUE)
+    uint16_t pwmValue = map(brightness, 0, 255, MIN_PWM_VALUE, MAX_PWM_VALUE);
+    ledcWrite(PWM_CHANNEL, pwmValue);
   } else {
-    // TODO: Actually handle this case
-    coverStatus = val;
+    // Light is off
+    ledcWrite(PWM_CHANNEL, 0);
   }
 }
 
-void handleSerial() {
-  if (Serial.available() >= 6) // all incoming communications are fixed length
-                               // at 6 bytes including the \n
-  {
-    char str[20];
-    memset(str, 0, 20);
+void processCommand(String cmd) {
+  // Commands start with '>'
+  if (cmd.length() == 0 || cmd.charAt(0) != '>') {
+    // Invalid command
+    return;
+  }
 
-    // Read the command until newline
-    Serial.readBytesUntil('\r', str, 20);
+  char cmdCode = cmd.charAt(1);
+  String response = "";
 
-    char cmd = str[1]; // Command character
-    char data[4];      // To hold data (3 digits and null terminator)
-    strncpy(data, str + 2, 3);
-    data[3] = '\0'; // Null-terminate data
-
-    // Useful for debugging to make sure your commands came through and are
-    // parsed correctly.
-    if (false) {
-      char temp[20];
-      sprintf(temp, "cmd = >%c, data = %s", cmd, data);
-      Serial.print(temp);
-      Serial.print('\n');
+  switch (cmdCode) {
+  case 'P': // Ping
+    // Command: >POOO
+    // Response: >PiiOOO
+    response = buildResponse('P', "OOO");
+    sendResponse(response);
+    break;
+  case 'O': // Open (dummy out)
+    // Command: >OOOO
+    // Response: >OiiOOO
+    response = buildResponse('O', "OOO");
+    sendResponse(response);
+    break;
+  case 'C': // Close (dummy out)
+    // Command: >COOO
+    // Response: >CiiOOO
+    response = buildResponse('C', "OOO");
+    sendResponse(response);
+    break;
+  case 'L': // Light on
+    // Command: >LOOO
+    // Response: >LiiOOO
+    lightOn = true;
+    updatePWM(); // update PWM output
+    response = buildResponse('L', "OOO");
+    sendResponse(response);
+    break;
+  case 'D': // Light off
+    // Command: >DOOO
+    // Response: >DiiOOO
+    lightOn = false;
+    // Turn off PWM
+    ledcWrite(PWM_CHANNEL, 0);
+    response = buildResponse('D', "OOO");
+    sendResponse(response);
+    break;
+  case 'B': // Set Brightness
+    // Command: >Bxxx
+    // Response: >Biixxx
+    if (cmd.length() >= 5) {
+      String brightnessStr = cmd.substring(2, 5);
+      int b = brightnessStr.toInt();
+      if (b >= 0 && b <= 255) {
+        brightness = (uint8_t)b;
+        updatePWM();
+        char buffer[4];
+        sprintf(buffer, "%03d", brightness);
+        response = buildResponse('B', buffer);
+        sendResponse(response);
+      }
     }
-
-    char response[20];
-
-    switch (cmd) {
-    /*
-        Ping device
-        Request: >P000\n
-        Return : *Pii000\n
-                id = deviceId
-    */
-    case 'P':
-      sprintf(response, "*P%dOOO", deviceId);
-      Serial.print(response);
-      Serial.print('\n');
-      break;
-
-    /*
-        Open shutter
-        Request: >O000\n
-        Return : *Oii000\n
-                id = deviceId
-
-        This command is only supported on the Flip-Flat!
-    */
-    case 'O':
-      sprintf(response, "*O%dOOO", deviceId);
-      SetShutter(OPEN);
-      Serial.print(response);
-      Serial.print('\n');
-      break;
-
-    /*
-        Close shutter
-        Request: >C000\n
-        Return : *Cii000\n
-                id = deviceId
-
-        This command is only supported on the Flip-Flat!
-    */
-    case 'C':
-      sprintf(response, "*C%dOOO", deviceId);
-      SetShutter(CLOSED);
-      Serial.print(response);
-      Serial.print('\n');
-      break;
-
-    /*
-        Turn light on
-        Request: >L000\n
-        Return : *Lii000\n
-                id = deviceId
-    */
-    case 'L':
-      sprintf(response, "*L%dOOO", deviceId);
-      Serial.print(response);
-      Serial.print('\n');
-      lightStatus = ON;
-      ledcWrite(0, brightness);
-      break;
-
-    /*
-        Turn light off
-        Request: >D000\n
-        Return : *Dii000\n
-                id = deviceId
-    */
-    case 'D':
-      sprintf(response, "*D%dOOO", deviceId);
-      Serial.print(response);
-      Serial.print('\n');
-      lightStatus = OFF;
-      ledcWrite(0, 0);
-      break;
-
-    /*
-        Set brightness
-        Request: >Bxxx\n
-                xxx = brightness value from 000-255
-        Return : *Biixxx\n
-                id = deviceId
-                xxx = value that brightness was set from 000-255
-    */
-    case 'B':
-      brightness = atoi(data);
-      if (lightStatus == ON)
-        ledcWrite(0, brightness);
-      sprintf(response, "*B%d%03d", deviceId, brightness);
-      Serial.print(response);
-      Serial.print('\n');
-      break;
-
-    /*
-        Get brightness
-        Request: >J000\n
-        Return : *JiiXXX\n
-                id = deviceId
-                XXX = current brightness value from 000-255
-    */
-    case 'J':
-      sprintf(response, "*J%d%03d", deviceId, brightness);
-      Serial.print(response);
-      Serial.print('\n');
-      break;
-
-    /*
-        Get device status:
-        Request: >S000\n
-        Return : *SiiMLC\n
-                id = deviceId
-                M  = motor status (0 stopped, 1 running)
-                L  = light status (0 off, 1 on)
-                C  = Cover Status (0 moving, 1 closed, 2 open)
-    */
-    case 'S':
-      sprintf(response, "*S%d%d%d%d", deviceId, motorStatus, lightStatus,
-              coverStatus);
-      Serial.print(response);
-      Serial.print('\n'); // Add just the LF character
-  
-      break;
-
-    /*
-        Get firmware version
-        Request: >V000\n
-        Return : *Vii001\n
-                id = deviceId
-    */
-    case 'V':
-      sprintf(response, "*V%d001", deviceId);
-      Serial.print(response);
-      Serial.print('\n');
-      break;
-
-    default:
-      // Handle unknown command
-      Serial.print("*E000"); // Example error response
-      Serial.print('\n');
-      break;
+    break;
+  case 'J': // Get Brightness
+    // Command: >JOOO
+    // Response: >Jiixxx
+    {
+      char buffer[4];
+      sprintf(buffer, "%03d", brightness);
+      response = buildResponse('J', buffer);
+      sendResponse(response);
     }
-
-    // Clear any remaining bytes in the buffer
-    while (Serial.available() > 0)
-      Serial.read();
+    break;
+  case 'S': // Get State
+    // Command: >SOOO
+    // Response: >Siiqrs
+    {
+      char s, r, q;
+      // s: cover status, set to '2' (cover open)
+      s = '2';
+      // r: light status, '0' off, '1' on
+      r = lightOn ? '1' : '0';
+      // q: motor status, set to '0' (motor stopped)
+      q = '0';
+      char buffer[4];
+      buffer[0] = q;
+      buffer[1] = r;
+      buffer[2] = s;
+      buffer[3] = '\0';
+      response = buildResponse('S', buffer);
+      sendResponse(response);
+    }
+    break;
+  case 'V': // Get Version
+    // Command: >VOOO
+    // Response: >Vii001
+    response = buildResponse('V', "001");
+    sendResponse(response);
+    break;
+  default:
+    // Unknown command
+    break;
   }
 }
 
-void loop() { handleSerial(); }
+void loop() {
+  // Read and process commands from Serial
+  static String inputString = "";
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    if (inChar == '\r') {
+      // Process the command
+      processCommand(inputString);
+      // Clear the input string
+      inputString = "";
+    } else {
+      inputString += inChar;
+    }
+  }
+
+  // Other code can go here
+}
+
+// Function to process commands
+
