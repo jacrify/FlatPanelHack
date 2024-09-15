@@ -14,6 +14,8 @@ const uint16_t MAX_PWM_VALUE = 5000; // maximum PWM value for max brightness
 
 #define SERIAL_BAUD_RATE 9600
 
+const size_t MAX_INPUT_LENGTH = 64; // Maximum length for inputString
+
 // Device constants
 #define PRODUCT_ID 99
 #define FIRMWARE_VERSION 1 // 001
@@ -37,12 +39,13 @@ void setup() {
   // Initialize Serial
   Serial.begin(SERIAL_BAUD_RATE);
 
-  // Initialize Bluetooth Serial
-  if (!BTSerial.begin("ESP32_FlatPanel")) {
+  // Initialize Bluetooth Serial with PIN authentication
+  if (!BTSerial.begin("ESP32_FlatPanel", true)) {
     // If Bluetooth initialization fails, continue without it
     Serial.println("An error occurred initializing Bluetooth");
   } else {
-    Serial.println("Bluetooth initialized");
+    BTSerial.setPin("1234"); // Set Bluetooth PIN
+    Serial.println("Bluetooth initialized with PIN");
   }
 
   // Initialize PWM using ledc
@@ -71,7 +74,13 @@ void loop() {
       // Clear the input string
       inputString = "";
     } else {
-      inputString += inChar;
+      if (inputString.length() < MAX_INPUT_LENGTH) {
+        inputString += inChar;
+      } else {
+        // Handle error: input too long
+        inputString = "";
+        // Optionally send an error response
+      }
     }
   }
 
@@ -105,7 +114,7 @@ void sendResponse(String resp) {
 // Function to build responses
 String buildResponse(char cmdChar, const char *data) {
   char buffer[16];
-  sprintf(buffer, "*%c%02d%s", cmdChar, PRODUCT_ID, data);
+  snprintf(buffer, sizeof(buffer), "*%c%02d%s", cmdChar, PRODUCT_ID, data);
   return String(buffer);
 }
 
