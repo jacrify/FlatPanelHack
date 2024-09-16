@@ -5,3 +5,8 @@
 .vscode/ipch
 .DS_Store
 clang-format
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v3/cache.db
+.aider.tags.cache.v3/cache.db-shm
+.aider.tags.cache.v3/cache.db-wal
