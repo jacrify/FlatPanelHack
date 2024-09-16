@@ -52,7 +52,7 @@ void setup() {
   ledcSetup(PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcAttachPin(PWM_PIN, PWM_CHANNEL);
 
-  // Initially set PWM value to zero
+  // Set initial brightness
   updatePWM();
 }
 
@@ -65,10 +65,10 @@ void loop() {
   }
 
   // Read and process commands from the active serial interface
-  static String inputString = "";
+  static String inputString;
   while (activeSerial->available()) {
-    char inChar = (char)activeSerial->read();
-    if (inChar == '\r') {
+    char inChar = activeSerial->read();
+    if (inChar == '\r' || inChar == '\n') {
       // Process the command
       processCommand(inputString);
       // Clear the input string
@@ -119,14 +119,14 @@ String buildResponse(char cmdChar, const char *data) {
 }
 
 // Function to process commands
-void processCommand(String cmd) {
+void processCommand(const String& cmd) {
   // Commands start with '>'
-  if (cmd.length() == 0 || cmd.charAt(0) != '>') {
+  if (cmd.length() == 0 || cmd[0] != '>') {
     // Invalid command
     return;
   }
 
-  char cmdCode = cmd.charAt(1);
+  char cmdCode = cmd[1];
   String response = "";
 
   switch (cmdCode) {
