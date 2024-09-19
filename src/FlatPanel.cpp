@@ -10,11 +10,10 @@
 #define PWM_CHANNEL 0
 
 const uint16_t MIN_PWM_VALUE = 50;   // minimum PWM value for min brightness
-const uint16_t MAX_PWM_VALUE = 5000; // maximum PWM value for max brightness
-
+const uint16_t MAX_PWM_VALUE = 10000; // maximum PWM value for max brightness
+//160 10000 no paper dualband
+//128 5000 2 paper lpro
 #define SERIAL_BAUD_RATE 9600
-
-const size_t MAX_INPUT_LENGTH = 64; // Maximum length for inputString
 
 // Device constants
 #define PRODUCT_ID 99
@@ -39,20 +38,19 @@ void setup() {
   // Initialize Serial
   Serial.begin(SERIAL_BAUD_RATE);
 
-  // Initialize Bluetooth Serial with PIN authentication
-  if (!BTSerial.begin("ESP32_FlatPanel", true)) {
+  // Initialize Bluetooth Serial
+  if (!BTSerial.begin("ESP32_FlatPanel")) {
     // If Bluetooth initialization fails, continue without it
     Serial.println("An error occurred initializing Bluetooth");
   } else {
-    BTSerial.setPin("1234"); // Set Bluetooth PIN
-    Serial.println("Bluetooth initialized with PIN");
+    Serial.println("Bluetooth initialized");
   }
 
   // Initialize PWM using ledc
   ledcSetup(PWM_CHANNEL, PWM_FREQUENCY, PWM_RESOLUTION);
   ledcAttachPin(PWM_PIN, PWM_CHANNEL);
 
-  // Set initial brightness
+  // Initially set PWM value to zero
   updatePWM();
 }
 
@@ -65,22 +63,16 @@ void loop() {
   }
 
   // Read and process commands from the active serial interface
-  static String inputString;
+  static String inputString = "";
   while (activeSerial->available()) {
-    char inChar = activeSerial->read();
-    if (inChar == '\r' || inChar == '\n') {
+    char inChar = (char)activeSerial->read();
+    if (inChar == '\r') {
       // Process the command
       processCommand(inputString);
       // Clear the input string
       inputString = "";
     } else {
-      if (inputString.length() < MAX_INPUT_LENGTH) {
-        inputString += inChar;
-      } else {
-        // Handle error: input too long
-        inputString = "";
-        // Optionally send an error response
-      }
+      inputString += inChar;
     }
   }
 
@@ -114,19 +106,19 @@ void sendResponse(String resp) {
 // Function to build responses
 String buildResponse(char cmdChar, const char *data) {
   char buffer[16];
-  snprintf(buffer, sizeof(buffer), "*%c%02d%s", cmdChar, PRODUCT_ID, data);
+  sprintf(buffer, "*%c%02d%s", cmdChar, PRODUCT_ID, data);
   return String(buffer);
 }
 
 // Function to process commands
-void processCommand(const String& cmd) {
+void processCommand(String cmd) {
   // Commands start with '>'
-  if (cmd.length() == 0 || cmd[0] != '>') {
+  if (cmd.length() == 0 || cmd.charAt(0) != '>') {
     // Invalid command
     return;
   }
 
-  char cmdCode = cmd[1];
+  char cmdCode = cmd.charAt(1);
   String response = "";
 
   switch (cmdCode) {
